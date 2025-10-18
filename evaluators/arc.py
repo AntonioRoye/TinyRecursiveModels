@@ -43,11 +43,13 @@ class ARC:
         eval_metadata: PuzzleDatasetMetadata, 
         submission_K: int = 2, 
         pass_Ks: Sequence[int] = (1, 2, 5, 10, 100, 1000), 
-        aggregated_voting: bool = True):
+        aggregated_voting: bool = True,
+        save_per_example: bool = False):
         super().__init__()
         self.pass_Ks = pass_Ks
         self.submission_K = submission_K
         self.aggregated_voting = aggregated_voting
+        self.save_per_example = save_per_example
         self.blank_identifier_id = eval_metadata.blank_identifier_id
 
         # Load identifiers and test puzzles
@@ -59,12 +61,14 @@ class ARC:
         # States
         self._local_hmap = {}
         self._local_preds = {}
+        self._per_example_records = []
         
     def begin_eval(self):
+        # Clear previous predictions and records if not aggregated voting or when starting fresh
         if not self.aggregated_voting:
-            # Clear previous predictions
             self._local_hmap = {}
             self._local_preds = {}
+            self._per_example_records = []
     
     def update_batch(self, batch: Dict[str, torch.Tensor], preds: Dict[str, torch.Tensor]):
         # Collect required outputs to CPU
@@ -147,6 +151,17 @@ class ARC:
                         ok |= h == label_hash
                         
                     num_test_correct[i] += ok
+
+                # Per-example logging (top-1 correctness and hashes)
+                if self.save_per_example and len(p_map):
+                    top1_h = p_map[0][0]
+                    self._per_example_records.append({
+                        "puzzle_name": name,
+                        "input_hash": input_hash,
+                        "label_hash": label_hash,
+                        "top1_pred_hash": top1_h,
+                        "top1_correct": bool(top1_h == label_hash),
+                    })
                     
                 # Query grids
                 pred_grids = []
@@ -166,10 +181,14 @@ class ARC:
             for i in range(len(self.pass_Ks)):
                 correct[i] += num_test_correct[i] / len(puzzle["test"])
 
-        # Save submission
+        # Save submission and per-example records
         if save_path is not None:
             with open(os.path.join(save_path, "submission.json"), "w") as f:
                 json.dump(submission, f)
+            if self.save_per_example and len(self._per_example_records):
+                with open(os.path.join(save_path, "per_example.jsonl"), "w") as f:
+                    for rec in self._per_example_records:
+                        f.write(json.dumps(rec) + "\n")
 
         # Final result
         all_results = {f"ARC/pass@{k}": correct[i] / len(self.test_puzzles) for i, k in enumerate(self.pass_Ks)}
