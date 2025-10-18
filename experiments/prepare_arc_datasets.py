@@ -23,8 +23,9 @@ def build_augmented(prefix: str, subsets: List[str], test_set_name: str, out_dir
 
 
 def main():
-    # Assumes the ARC-AGI combined jsons are already present under TinyRecursiveModels/kaggle/combined
-    base = os.path.join("TinyRecursiveModels", "kaggle", "combined")
+    # Assumes the ARC-AGI combined jsons are already present under <repo>/kaggle/combined
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    base = os.path.join(repo_root, "kaggle", "combined")
 
     prefix = os.path.join(base, "arc-agi")
     subsets = [
@@ -36,7 +37,7 @@ def main():
     ]
 
     # Build multiple augmentation levels for optional accuracy-vs-aug curve
-    levels = [0, 1, 4, 16, 64, 256, 1000]
+    levels = [0, 1, 4, 16, 64, 256, 576, 1000]
     outputs = {}
     for k in levels:
         out_dir = os.path.join("data", f"arc-aug-{k}")

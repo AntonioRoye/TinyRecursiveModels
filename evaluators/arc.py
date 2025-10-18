@@ -129,8 +129,12 @@ class ARC:
                 label_hash = grid_hash(arc_grid_to_np(pair["output"]))
                 
                 p_map = {}
+                votes_count_current = 0
                 for hmap, preds in global_hmap_preds:  # type: ignore
-                    for h, q in preds.get(name, {}).get(input_hash, {}):
+                    vlist = preds.get(name, {}).get(input_hash, {})
+                    # vlist is a list of (pred_hash, q)
+                    votes_count_current += len(vlist) if isinstance(vlist, list) else 0
+                    for h, q in vlist:
                         p_map.setdefault(h, [0, 0])
                         p_map[h][0] += 1
                         p_map[h][1] += q
@@ -161,6 +165,7 @@ class ARC:
                         "label_hash": label_hash,
                         "top1_pred_hash": top1_h,
                         "top1_correct": bool(top1_h == label_hash),
+                        "num_votes": int(votes_count_current),
                     })
                     
                 # Query grids
