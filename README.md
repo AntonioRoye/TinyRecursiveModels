@@ -77,6 +77,34 @@ wandb login YOUR-LOGIN # login if you want the logger to sync results to your We
 Optional Llama baseline:
 - If you plan to run the Llama-3-8B QLoRA baseline, see `modal_llama.py`. It installs `transformers`, `peft`, `accelerate`, `bitsandbytes`, `datasets`, and `unsloth` inside the Modal image.
 
+### Experiment 1 — Paper vs Single-Aug (Modal)
+
+```bash
+# Build datasets in the Modal volume
+modal run modal_trm.py::main --action prepare_data
+# or a smaller pair matching HF v1 checkpoints
+modal run modal_trm.py::main --action build_arc1
+
+# (Optional) Fetch verification checkpoint into the Modal volume
+modal run modal_trm.py::main --action fetch_ckpt \
+  --repo arcprize/trm_arc_prize_verification \
+  --dest checkpoints/hf_trm
+
+# Run both modes (paper + single) with your checkpoint path inside the container
+modal run modal_trm.py::main --action exp1 \
+  --checkpoint /workspace/TinyRecursiveModels/checkpoints/hf_trm/<subdir>/step_XXXXX
+
+# Paper-only or Single-only
+modal run modal_trm.py::main --action exp1_paper_only \
+  --checkpoint /workspace/TinyRecursiveModels/checkpoints/hf_trm/<subdir>/step_XXXXX
+modal run modal_trm.py::main --action exp1_single_only \
+  --checkpoint /workspace/TinyRecursiveModels/checkpoints/hf_trm/<subdir>/step_XXXXX
+
+# Quick sanity check over a few batches
+modal run modal_trm.py::main --action quick_exp1 \
+  --checkpoint /workspace/TinyRecursiveModels/checkpoints/hf_trm/<subdir>/step_XXXXX
+```
+
 ### Experiment 3 — Llama-3-8B baseline (Modal)
 
 Requires a Modal account and Python client (`pip install modal`). If the HF model is gated, provide a token via a Modal secret named `pipeline-secrets` (key: `HF_TOKEN`) or export `HUGGING_FACE_HUB_TOKEN`/`HF_TOKEN` in your environment.
