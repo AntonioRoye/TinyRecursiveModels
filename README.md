@@ -240,7 +240,7 @@ If you find our work useful, please consider citing:
 
 ```bibtex
 @misc{roye2025trmrepro,
-      title={Less is More: Disentangling the Efficiency and Inductive Bias of Tiny Recursive Models},
+      title={A Technical Note on the Efficiency and Inductive Bias of Tiny Recursive Models},
       author={Roye-Azar, Antonio},
       year={2025},
       note={Technical report; TRM reproduction and analysis},
