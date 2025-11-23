@@ -21,6 +21,26 @@ from pretrain import (
     create_evaluators,
 )
 from experiments.ci_utils import build_exp1_table
+def _make_serializable(obj):
+    # Recursively convert numpy/torch scalars and arrays to plain Python types
+    try:
+        # Handle numpy/torch scalars with .item()
+        if hasattr(obj, "item"):
+            return obj.item()
+    except Exception:
+        pass
+    try:
+        # Handle numpy arrays / torch tensors with .tolist()
+        if hasattr(obj, "tolist"):
+            return obj.tolist()
+    except Exception:
+        pass
+    if isinstance(obj, dict):
+        return {k: _make_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_make_serializable(v) for v in obj]
+    return obj
+
 
 
 def _safe_git_commit() -> Optional[str]:
@@ -279,17 +299,8 @@ def main(hydra_config: DictConfig):
         # Default to ARC evaluator with standard pass@Ks; leave aggregated voting to dataset structure
         config.evaluators = [{"name": "arc@ARC"}]  # type: ignore[assignment]
 
-    # Run paper mode (1000× voting)
-    paper = _run_single_eval(
-        config=config,
-        data_paths=paper_paths,
-        rank=rank,
-        world_size=world_size,
-        label="paper_mode_1000x",
-        checkpoint_path_suffix="paper_1000x",
-    )
-
-    # Run single-augmentation mode (1×, no voting)
+    # Run single-augmentation mode (1×, no voting) FIRST for quick verification
+    print("Running Single-Aug Mode (1x)...")
     single = _run_single_eval(
         config=config,
         data_paths=single_aug_paths,
@@ -297,6 +308,17 @@ def main(hydra_config: DictConfig):
         world_size=world_size,
         label="single_aug_1x",
         checkpoint_path_suffix="single_aug_1x",
+    )
+
+    # Run paper mode (1000× voting) SECOND
+    print("Running Paper Mode (1000x)...")
+    paper = _run_single_eval(
+        config=config,
+        data_paths=paper_paths,
+        rank=rank,
+        world_size=world_size,
+        label="paper_mode_1000x",
+        checkpoint_path_suffix="paper_1000x",
     )
 
     # Combined JSON report with methods snapshot
@@ -341,7 +363,7 @@ def main(hydra_config: DictConfig):
     os.makedirs(out_dir, exist_ok=True)
     out_file = os.path.join(out_dir, "exp1_report.json")
     with open(out_file, "w") as f:
-        json.dump(report, f, indent=2)
+        json.dump(_make_serializable(report), f, indent=2)
 
     # Build and save concise CI table
     try:

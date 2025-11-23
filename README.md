@@ -4,11 +4,54 @@ This is the codebase for the paper: "Less is More: Recursive Reasoning with Tiny
 
 [Paper](https://arxiv.org/abs/2510.04871)
 
-### Motivation
+### Reproducibility (concise)
 
-Tiny Recursion Model (TRM) is a recursive reasoning model that achieves amazing scores of 45% on ARC-AGI-1 and 8% on ARC-AGI-2 with a tiny 7M parameters neural network. The idea that one must rely on massive foundational models trained for millions of dollars by some big corporation in order to achieve success on hard tasks is a trap. Currently, there is too much focus on exploiting LLMs rather than devising and expanding new lines of direction. With recursive reasoning, it turns out that “less is more”: you don’t always need to crank up model size in order for a model to reason and solve hard problems. A tiny model pretrained from scratch, recursing on itself and updating its answers over time, can achieve a lot without breaking the bank.
+This fork provides a minimal, transparent path to reproduce evaluation and efficiency results using only the repository’s Python modules (no external orchestration required).
 
-This work came to be after I learned about the recent innovative Hierarchical Reasoning Model (HRM). I was amazed that an approach using small models could do so well on hard tasks like the ARC-AGI competition (reaching 40% accuracy when normally only Large Language Models could compete). But I kept thinking that it is too complicated, relying too much on biological arguments about the human brain, and that this recursive reasoning process could be greatly simplified and improved. Tiny Recursion Model (TRM) simplifies recursive reasoning to its core essence, which ultimately has nothing to do with the human brain, does not require any mathematical (fixed-point) theorem, nor any hierarchy.
+Provenance:
+- Upstream repo: `SamsungSAILMontreal/TinyRecursiveModels`
+- Upstream commit pinned in this fork: `e7b68717f0a6c4cbb4ce6fbef787b14f42083bd9`
+- Additions in this fork (non-exhaustive): `modal_trm.py`, `modal_llama.py`, `experiments/run_exp1.py`, `experiments/prepare_arc_datasets.py`, `experiments/quick_checks.py`, `experiments/fetch_hf_checkpoints.py`, `experiments/ci_utils.py`.
+
+Quick start (after environment setup and building datasets):
+
+```bash
+# 1) Build ARC datasets (writes data/arc-aug-0 and data/arc-aug-1000 plus a manifest)
+python -m experiments.prepare_arc_datasets
+
+# 2) Fetch the public verification checkpoint from HF (path printed on completion)
+python -m experiments.fetch_hf_checkpoints --repo_id arcprize/trm_arc_prize_verification --dest checkpoints/hf_trm
+
+# 3) Evaluate TRM in both modes (paper 1000× voting; single-aug 1× canonical)
+python -m experiments.run_exp1 \
+  data_paths='[data/arc-aug-1000]' \
+  data_paths_test='[data/arc-aug-0]' \
+  load_checkpoint=/ABS/PATH/TO/step_xxxxx \
+  checkpoint_path=checkpoints/exp1_arc \
+  arch=trm arch.L_cycles=4 arch.H_cycles=3 arch.L_layers=2
+
+# 4) Optional: accuracy vs augmentation curve (e.g., 0,1,4,...,1000)
+python -m experiments.acc_vs_aug \
+  load_checkpoint=/ABS/PATH/TO/step_xxxxx \
+  checkpoint_path=checkpoints/exp1_arc_curve \
+  arch=trm
+
+# 5) Benchmark TRM throughput, latency, and peak VRAM (H100 recommended)
+# Option A: via Modal GPU function
+modal run modal_trm.py::main --action exp6 --checkpoint /workspace/TinyRecursiveModels/checkpoints/hf_trm/<subdir>/step_xxxxx
+# Option B: run your own small timed loop using pretrain.py utilities (see experiments/run_exp1.py for patterns)
+
+# Environment details and metrics (latency/memory) are captured in exp1_report.json. Save `nvidia-smi -q` if you need full driver details.
+```
+
+Seeds:
+- Default seeds are in Hydra config (see `config/cfg_pretrain.yaml`). Override with `seed=<int>` in the CLI overrides as needed.
+
+Data note (licensing/compliance):
+- ARC datasets are copyrighted; do not redistribute raw task files. This repo includes Kaggle JSON references used to build processed arrays. Generate `data/` locally via `python -m experiments.prepare_arc_datasets`.
+- The 1000× and 0× datasets for ARC-AGI-1 are placed under `data/arc-aug-1000` and `data/arc-aug-0`. A manifest is written to `data/arc_exp1_manifest.json`.
+
+
 
 ### How TRM works
 
@@ -21,14 +64,40 @@ Tiny Recursion Model (TRM) recursively improves its predicted answer y with a ti
 ### Requirements
 
 - Python 3.10 (or similar)
-- Cuda 12.6.0 (or similar)
+- CUDA 12.1 (or similar)
 
 ```bash
 pip install --upgrade pip wheel setuptools
-pip install --pre --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu126 # install torch based on your cuda version
+pip install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 # install torch build matching your CUDA version
 pip install -r requirements.txt # install requirements
 pip install --no-cache-dir --no-build-isolation adam-atan2 
 wandb login YOUR-LOGIN # login if you want the logger to sync results to your Weights & Biases (https://wandb.ai/)
+```
+
+Optional Llama baseline:
+- If you plan to run the Llama-3-8B QLoRA baseline, see `modal_llama.py`. It installs `transformers`, `peft`, `accelerate`, `bitsandbytes`, `datasets`, and `unsloth` inside the Modal image.
+
+### Experiment 3 — Llama-3-8B baseline (Modal)
+
+Requires a Modal account and Python client (`pip install modal`). If the HF model is gated, provide a token via a Modal secret named `pipeline-secrets` (key: `HF_TOKEN`) or export `HUGGING_FACE_HUB_TOKEN`/`HF_TOKEN` in your environment.
+
+```bash
+# Prepare JSONL data from ARC JSONs baked into the image
+modal run modal_llama.py::main --action prepare
+
+# Fine-tune Llama-3-8B-Instruct (QLoRA) on training examples
+modal run modal_llama.py::main --action train
+
+# Evaluate exact-match accuracy on ARC-AGI-1 eval set
+modal run modal_llama.py::main --action eval
+```
+
+Artifacts are saved under the Modal volume mounted at `/workspace/checkpoints` (adapter and merged model).
+
+### Experiment 6 — Efficiency benchmark (Modal)
+
+```bash
+modal run modal_trm.py::main --action exp6 --checkpoint /workspace/TinyRecursiveModels/checkpoints/hf_trm/<subdir>/step_XXXXX
 ```
 
 ### Dataset Preparation
@@ -135,9 +204,20 @@ arch.H_cycles=3 arch.L_cycles=4 \
 
 *Runtime:* < 24 hours
 
+Outputs are written under `checkpoints/.../exp1_*` (e.g., `exp1_report.json`, ARC evaluator logs in `evaluator_ARC_step_0`) and any Hydra-run output directories configured in your overrides.
+
 ## Reference
 
 If you find our work useful, please consider citing:
+
+```bibtex
+@misc{roye2025trmrepro,
+      title={Less is More: Disentangling the Efficiency and Inductive Bias of Tiny Recursive Models},
+      author={Roye-Azar, Antonio},
+      year={2025},
+      note={Technical report; TRM reproduction and analysis},
+}
+```
 
 ```bibtex
 @misc{jolicoeurmartineau2025morerecursivereasoningtiny,

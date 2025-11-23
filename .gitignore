@@ -1,0 +1,15 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+
+# Local artifacts
+data/
+outputs/
+checkpoints/
+wandb/
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
