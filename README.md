@@ -128,6 +128,76 @@ Artifacts are saved under the Modal volume mounted at `/workspace/checkpoints` (
 modal run modal_trm.py::main --action exp6 --checkpoint /workspace/TinyRecursiveModels/checkpoints/hf_trm/<subdir>/step_XXXXX
 ```
 
+### Experiment C — Puzzle-ID ablations (Modal)
+
+```bash
+# Default (normal puzzle IDs; aggregated voting on)
+modal run modal_trm.py::main --action expC \
+  --checkpoint /workspace/TinyRecursiveModels/checkpoints/hf_trm/arc_v1_public/step_518071 \
+  --data-dir data/arc-aug-1000
+
+# Randomize puzzle IDs
+EXPC_PUZZLE_ID_MODE=random modal run modal_trm.py::main --action expC \
+  --checkpoint /workspace/TinyRecursiveModels/checkpoints/hf_trm/arc_v1_public/step_518071 \
+  --data-dir data/arc-aug-1000
+
+# Blank puzzle IDs
+EXPC_PUZZLE_ID_MODE=blank modal run modal_trm.py::main --action expC \
+  --checkpoint /workspace/TinyRecursiveModels/checkpoints/hf_trm/arc_v1_public/step_518071 \
+  --data-dir data/arc-aug-1000
+
+# Optional: disable aggregated voting (per-example pass@1 reporting)
+EXPC_AGGREGATED_VOTING=0 modal run modal_trm.py::main --action expC \
+  --checkpoint /workspace/TinyRecursiveModels/checkpoints/hf_trm/arc_v1_public/step_518071 \
+  --data-dir data/arc-aug-1000
+```
+
+### Experiment D — Short training + comparable eval (Modal)
+
+```bash
+# Train short on 1000× aug
+PYTORCH_ALLOC_CONF=expandable_segments:True,max_split_size_mb:256 \
+RUN_NAME=trm_D_aug1000_2500 \
+GBS=256 MAX_STEPS=2500 EVAL_ONLY_LAST=1 \
+L_CYCLES=4 H_CYCLES=3 L_LAYERS=2 \
+LOG_EVERY=50 TRAIN_LOSS_MAVG=200 \
+modal run --detach modal_trm.py::main --action train_short \
+  --data-dir data/arc-aug-1000
+
+# Comparable eval for the trained 1000× model (no aggregated voting)
+EXPC_AGGREGATED_VOTING=0 modal run modal_trm.py::main --action expC \
+  --checkpoint /workspace/TinyRecursiveModels/checkpoints/trm_D_aug1000_2500/step_2500 \
+  --data-dir data/arc-aug-1000
+
+# Train short on 0× aug
+PYTORCH_ALLOC_CONF=expandable_segments:True,max_split_size_mb:256 \
+RUN_NAME=trm_D_aug0_2500 \
+GBS=256 MAX_STEPS=2500 EVAL_ONLY_LAST=1 \
+L_CYCLES=4 H_CYCLES=3 L_LAYERS=2 \
+LOG_EVERY=50 TRAIN_LOSS_MAVG=200 \
+modal run --detach modal_trm.py::main --action train_short \
+  --data-dir data/arc-aug-0
+
+# Comparable eval for the trained 0× model (no aggregated voting)
+EXPC_AGGREGATED_VOTING=0 modal run modal_trm.py::main --action expC \
+  --checkpoint /workspace/TinyRecursiveModels/checkpoints/trm_D_aug0_2500/step_2500 \
+  --data-dir data/arc-aug-0
+```
+
+### Experiment E — Per-step trajectory (Modal)
+
+```bash
+# Limit trajectory analysis to the first 4 refinement steps
+EXPE_MAX_STEPS=4 modal run modal_trm.py::main --action expE \
+  --checkpoint /workspace/TinyRecursiveModels/checkpoints/hf_trm/arc_v1_public/step_518071 \
+  --data-dir data/arc-aug-1000
+
+# Full trajectory (defaults to arch.L_cycles)
+modal run modal_trm.py::main --action expE \
+  --checkpoint /workspace/TinyRecursiveModels/checkpoints/hf_trm/arc_v1_public/step_518071 \
+  --data-dir data/arc-aug-1000
+```
+
 ### Dataset Preparation
 
 ```bash
@@ -239,11 +309,12 @@ Outputs are written under `checkpoints/.../exp1_*` (e.g., `exp1_report.json`, AR
 If you find our work useful, please consider citing:
 
 ```bibtex
-@misc{roye2025trmrepro,
-      title={A Technical Note on the Efficiency and Inductive Bias of Tiny Recursive Models},
-      author={Roye-Azar, Antonio},
-      year={2025},
-      note={Technical report; TRM reproduction and analysis},
+@misc{roye-azar2025trm,
+  title        = {Tiny Recursive Models on {ARC-AGI-1}: Inductive Biases, Identity Conditioning, and Test-Time Compute},
+  author       = {Roye-Azar, Antonio and Vargas-Naranjo, Santiago and Ghai, Dhruv and Balamurugan, Nithin and Amir, Rayan},
+  year         = {2025},
+  howpublished = {arXiv preprint},
+  note         = {TRM reproduction and analysis on ARC-AGI-1},
 }
 ```
 

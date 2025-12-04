@@ -1033,6 +1033,61 @@ def main(
 			seed=seed,
 			batch_size=32,
 		)
+	elif action == "expC":
+		if not checkpoint:
+			raise SystemExit("Please pass --checkpoint=<path_to_checkpoint_in_volume_or_abs_path>")
+		# Optional: use data_dir and arch from args; default aggregated voting true; mode via env or set here
+		mode = os.environ.get("EXPC_PUZZLE_ID_MODE", "normal")
+		agg = os.environ.get("EXPC_AGGREGATED_VOTING", "1") not in ("0", "false", "False")
+		expC_puzzleid.remote(
+			load_checkpoint=checkpoint,
+			data_dir=data_dir,
+			puzzle_id_mode=mode,
+			aggregated_voting=agg,
+			arch=arch,
+		)
+	elif action == "expE":
+		if not checkpoint:
+			raise SystemExit("Please pass --checkpoint=<path_to_checkpoint_in_volume_or_abs_path>")
+		steps_env = os.environ.get("EXPE_MAX_STEPS", "")
+		max_steps = int(steps_env) if steps_env.isdigit() else 0
+		expE_per_step.remote(
+			load_checkpoint=checkpoint,
+			data_dir=data_dir,
+			max_steps=max_steps,
+			arch=arch,
+		)
+	elif action == "train_short":
+		# Train on provided data_dir with a short schedule
+		run = os.environ.get("RUN_NAME", "trm_short")
+		gb = int(os.environ.get("GBS", "512"))
+		ep = int(os.environ.get("EPOCHS", "50000"))
+		ei = int(os.environ.get("EVAL_INTERVAL", "5000"))
+		# Forward simple logging cadence envs to the remote container
+		le_env = os.environ.get("LOG_EVERY", "")
+		mavg_env = os.environ.get("TRAIN_LOSS_MAVG", "")
+		log_every = int(le_env) if le_env.isdigit() and int(le_env) > 0 else None
+		train_loss_mavg = int(mavg_env) if mavg_env.isdigit() and int(mavg_env) > 0 else None
+		# Forward step/eval controls explicitly
+		ms_env = os.environ.get("MAX_STEPS", "")
+		max_steps = int(ms_env) if ms_env.isdigit() and int(ms_env) > 0 else None
+		eol_env = os.environ.get("EVAL_ONLY_LAST", "")
+		eval_only_last = None
+		if len(eol_env):
+			eval_only_last = (eol_env not in ("0", "false", "False"))
+		train_trm_short.remote(
+			data_dir=data_dir,
+			run_name=run,
+			arch=arch,
+			global_batch_size=gb,
+			epochs=ep,
+			eval_interval=ei,
+			seed=seed,
+			log_every=log_every,
+			train_loss_mavg=train_loss_mavg,
+			max_steps=max_steps,
+			eval_only_last=eval_only_last,
+		)
 	else:
 		print("Actions:")
 		print("  - prepare_data")
@@ -1044,6 +1099,9 @@ def main(
 		print("  - exp1_paper_only  (requires --checkpoint)")
 		print("  - exp1_single_only (requires --checkpoint)")
 		print("  - exp6 (requires --checkpoint) efficiency benchmarking")
+		print("  - expC (requires --checkpoint) Experiment C puzzle-ID ablations")
+		print("  - expE (requires --checkpoint) Experiment E per-step pass@1")
+		print("  - train_short  (short TRM training run) env: RUN_NAME, GBS, EPOCHS, EVAL_INTERVAL")
 		print("")
 		print("Examples:")
 		print("  modal run modal_trm.py::main --action prepare_data")
@@ -1055,4 +1113,191 @@ def main(
 		print("  modal run modal_trm.py::main --action exp1_single_only --checkpoint /workspace/TinyRecursiveModels/checkpoints/<your_run>/step_XXXX")
 		print("  modal run modal_trm.py::main --action exp6 --checkpoint /workspace/TinyRecursiveModels/checkpoints/hf_trm/arc_v1_public/step_518071")
 
+
+
+@app.function(
+	image=image,
+	gpu="H100",
+	volumes={
+		f"{REMOTE_TRM_DIR}/data": DATA_VOL,
+		f"{REMOTE_TRM_DIR}/outputs": OUTPUTS_VOL,
+		f"{REMOTE_TRM_DIR}/checkpoints": CHECKPOINTS_VOL,
+	},
+	timeout=60 * 60 * 6,  # 6 hours
+)
+def expC_puzzleid(
+	load_checkpoint: str,
+	data_dir: str = "data/arc-aug-1000",
+	puzzle_id_mode: str = "normal",  # normal | blank | random
+	aggregated_voting: bool = True,
+	arch: str = "trm",
+) -> None:
+	"""
+	Experiment C: Evaluate puzzle-ID dependence with ablations (normal|blank|random).
+	"""
+	env = _default_env()
+	# Avoid TorchDynamo / torch.compile device-propagation pitfalls
+	env["DISABLE_COMPILE"] = "1"
+	env["TORCHDYNAMO_DISABLE"] = "1"
+	# Controls for run_expC_puzzle_id
+	env["EXPC_PUZZLE_ID_MODE"] = str(puzzle_id_mode)
+	env["EXPC_AGGREGATED_VOTING"] = "1" if aggregated_voting else "0"
+	os.makedirs(f"{REMOTE_TRM_DIR}/outputs", exist_ok=True)
+	os.makedirs(f"{REMOTE_TRM_DIR}/checkpoints/expC", exist_ok=True)
+
+	hydra_overrides = [
+		f"arch={arch}",
+		"arch.L_cycles=4",
+		"arch.H_cycles=3",
+		"arch.L_layers=2",
+		f"+load_checkpoint={load_checkpoint}",
+		f"data_paths=['{data_dir}']",
+		f"data_paths_test=['{data_dir}']",
+		"global_batch_size=768",
+		"+eval_save_outputs=[]",
+		"hydra.run.dir=outputs/expC/${now:%Y-%m-%d}/${now:%H-%M-%S}",
+	]
+	cmd = ["python", "-m", "experiments.run_expC_puzzle_id"] + hydra_overrides
+	_run(cmd, env=env, cwd=REMOTE_TRM_DIR)
+
+
+@app.function(
+	image=image,
+	gpu="H100",
+	volumes={
+		f"{REMOTE_TRM_DIR}/data": DATA_VOL,
+		f"{REMOTE_TRM_DIR}/outputs": OUTPUTS_VOL,
+		f"{REMOTE_TRM_DIR}/checkpoints": CHECKPOINTS_VOL,
+	},
+	timeout=60 * 60 * 12,  # 12 hours
+)
+def expE_per_step(
+	load_checkpoint: str,
+	data_dir: str = "data/arc-aug-1000",
+	max_steps: int = 0,  # 0=use arch.L_cycles
+	arch: str = "trm",
+) -> None:
+	"""
+	Experiment E: Per-step trajectory analysis.
+	Prints JSON with pass@1 per refinement step.
+	"""
+	env = _default_env()
+	env["DISABLE_COMPILE"] = "1"
+	env["TORCHDYNAMO_DISABLE"] = "1"
+	if max_steps and max_steps > 0:
+		env["EXPE_MAX_STEPS"] = str(int(max_steps))
+	os.makedirs(f"{REMOTE_TRM_DIR}/outputs", exist_ok=True)
+	os.makedirs(f"{REMOTE_TRM_DIR}/checkpoints/expE", exist_ok=True)
+
+	hydra_overrides = [
+		f"arch={arch}",
+		"arch.L_cycles=6",
+		"arch.H_cycles=3",
+		"arch.L_layers=2",
+		f"+load_checkpoint={load_checkpoint}",
+		f"data_paths=['{data_dir}']",
+		f"data_paths_test=['{data_dir}']",
+		"global_batch_size=768",
+		"+eval_save_outputs=[]",
+		"hydra.run.dir=outputs/expE/${now:%Y-%m-%d}/${now:%H-%M-%S}",
+	]
+	cmd = ["python", "-m", "experiments.run_expE_traj"] + hydra_overrides
+	_run(cmd, env=env, cwd=REMOTE_TRM_DIR)
+
+
+@app.function(
+	image=image,
+	gpu="H100",
+	volumes={
+		f"{REMOTE_TRM_DIR}/data": DATA_VOL,
+		f"{REMOTE_TRM_DIR}/outputs": OUTPUTS_VOL,
+		f"{REMOTE_TRM_DIR}/checkpoints": CHECKPOINTS_VOL,
+	},
+	timeout=60 * 60 * 24,  # 24 hours
+)
+def train_trm_short(
+	data_dir: str,
+	run_name: str = "trm_short",
+	arch: str = "trm",
+	global_batch_size: int = 512,
+	epochs: int = 50000,
+	eval_interval: int = 5000,
+	seed: int = 42,
+	log_every: Optional[int] = None,
+	train_loss_mavg: Optional[int] = None,
+	max_steps: Optional[int] = None,
+	eval_only_last: Optional[bool] = None,
+) -> None:
+	"""
+	Experiment D: Short training run for TRM on a specified dataset directory.
+	Example dataset dirs: data/arc-aug-0, data/arc-aug-100, data/arc-aug-1000
+	"""
+	env = _default_env()
+	# For stability under Hydra/torch.compile in training; re-enable later if desired
+	env["DISABLE_COMPILE"] = "1"
+	env["TORCHDYNAMO_DISABLE"] = "1"
+	# Disable W&B in non-interactive Modal runs unless user configures it
+	env.setdefault("WANDB_MODE", "offline")
+	env.setdefault("WANDB_DISABLED", "true")
+	# Help CUDA allocator avoid fragmentation on large sequences
+	env.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True,max_split_size_mb:256")
+	# Forward requested console logging cadence to training subprocess
+	if log_every is not None and int(log_every) > 0:
+		env["LOG_EVERY"] = str(int(log_every))
+	if train_loss_mavg is not None and int(train_loss_mavg) > 0:
+		env["TRAIN_LOSS_MAVG"] = str(int(train_loss_mavg))
+	# Optional: cap total steps and only evaluate at end
+	if max_steps is not None and int(max_steps) > 0:
+		env["MAX_STEPS"] = str(int(max_steps))
+	else:
+		_ms = os.environ.get("MAX_STEPS", "")
+		if _ms.isdigit() and int(_ms) > 0:
+			env["MAX_STEPS"] = _ms
+	if eval_only_last is not None:
+		env["EVAL_ONLY_LAST"] = "1" if eval_only_last else "0"
+	else:
+		_eol = os.environ.get("EVAL_ONLY_LAST", "")
+		if len(_eol):
+			env["EVAL_ONLY_LAST"] = _eol
+	os.makedirs(f"{REMOTE_TRM_DIR}/outputs", exist_ok=True)
+	os.makedirs(f"{REMOTE_TRM_DIR}/checkpoints/{run_name}", exist_ok=True)
+	# Preflight checklist for training
+	print("[Train] Preflight checklist:")
+	print(f"  - data_dir: {data_dir} (exists={os.path.exists(os.path.join(REMOTE_TRM_DIR, data_dir))})")
+	print(f"  - run_name: {run_name}")
+	print(f"  - batch_size={int(global_batch_size)}, epochs={int(epochs)}, eval_interval={int(eval_interval)}, seed={seed}")
+	# Optional overrides via environment variables to reduce memory pressure
+	lc = int(os.environ.get("L_CYCLES", "4"))
+	hc = int(os.environ.get("H_CYCLES", "3"))
+	ll = int(os.environ.get("L_LAYERS", "2"))
+	overrides = [
+		f"arch={arch}",
+		f"arch.L_cycles={lc}",
+		f"arch.H_cycles={hc}",
+		f"arch.L_layers={ll}",
+		f"seed={seed}",
+		f"global_batch_size={int(global_batch_size)}",
+		f"epochs={int(epochs)}",
+		f"eval_interval={int(eval_interval)}",
+		# Use '+' for fields not present in cfg_pretrain.yaml (Hydra strict mode)
+		f"+project_name=ARC-ACT-torch",
+		f"+run_name={run_name}",
+		f"+checkpoint_path=checkpoints/{run_name}",
+		f"data_paths=['{data_dir}']",
+		"hydra.run.dir=outputs/train/${now:%Y-%m-%d}/${now:%H-%M-%S}",
+	]
+	print("[Train] Hydra overrides:", " ".join(overrides))
+	# Initialize a single-process default process group so evaluators using
+	# torch.distributed.gather_object have a default group even on 1 GPU.
+	pycode = (
+		"import sys, importlib\n"
+		"import torch.distributed as dist\n"
+		"# Create a 1-process process group for gather/reduce ops in evaluators\n"
+		"dist.init_process_group(backend='gloo', init_method='tcp://127.0.0.1:29500', rank=0, world_size=1)\n"
+		f"sys.argv=['pretrain'] + {repr(overrides)}\n"
+		"import pretrain\n"
+		"pretrain.launch()\n"
+	)
+	cmd = ["python", "-c", pycode]
+	_run(cmd, env=env, cwd=REMOTE_TRM_DIR)
 

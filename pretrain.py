@@ -248,9 +248,22 @@ def load_checkpoint(model: nn.Module, config: PretrainConfig):
         # Load state dict
         state_dict = torch.load(config.load_checkpoint, map_location="cuda")
 
+        # If model is torch.compile'd, unwrap to the original module for state_dict loading
+        base_model: nn.Module = getattr(model, "_orig_mod", model)  # OptimizedModule._orig_mod if compiled
+
+        # Normalize state_dict keys to match the unwrapped model:
+        # - If keys are prefixed with "_orig_mod.", strip that prefix.
+        if any(k.startswith("_orig_mod.") for k in state_dict.keys()):
+            state_dict = { (k[10:] if k.startswith("_orig_mod.") else k): v for k, v in state_dict.items() }
+
         # Resize and reset puzzle emb if needed
-        puzzle_emb_name = "_orig_mod.model.inner.puzzle_emb.weights"
-        expected_shape: torch.Size = model.model.puzzle_emb.weights.shape  # type: ignore
+        # Support both compiled and non-compiled checkpoint key conventions
+        pe_keys = [
+            "model.inner.puzzle_emb.weights",
+            "_orig_mod.model.inner.puzzle_emb.weights",
+        ]
+        puzzle_emb_name = next((k for k in pe_keys if k in state_dict), pe_keys[0])
+        expected_shape: torch.Size = base_model.model.puzzle_emb.weights.shape  # type: ignore
         if puzzle_emb_name in state_dict:
             puzzle_emb = state_dict[puzzle_emb_name]
             if puzzle_emb.shape != expected_shape:
@@ -259,7 +272,11 @@ def load_checkpoint(model: nn.Module, config: PretrainConfig):
                 state_dict[puzzle_emb_name] = (
                     torch.mean(puzzle_emb, dim=0, keepdim=True).expand(expected_shape).contiguous()
                 )
-        model.load_state_dict(state_dict, assign=True)
+        # Load into the (possibly unwrapped) model; fall back if assign= not supported
+        try:
+            base_model.load_state_dict(state_dict, assign=True)  # type: ignore[call-arg]
+        except TypeError:
+            base_model.load_state_dict(state_dict, strict=False)
 
 
 def compute_lr(base_lr: float, config: PretrainConfig, train_state: TrainState):
@@ -301,6 +318,13 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
 
     # Forward
     train_state.carry, loss, metrics, _, _ = train_state.model(carry=train_state.carry, batch=batch, return_keys=[])
+    # Ensure scalar loss is included in metrics for logging/averaging
+    try:
+        if isinstance(loss, torch.Tensor) and "loss" not in metrics:
+            metrics = dict(metrics)
+            metrics["loss"] = loss.detach()
+    except Exception:
+        pass
 
     ((1 / global_batch_size) * loss).backward()
 
@@ -537,6 +561,15 @@ def launch(hydra_config: DictConfig):
     RANK = 0
     WORLD_SIZE = 1
     CPU_PROCESS_GROUP = None
+    # Lightweight logging controls from env
+    LOG_EVERY = int(os.environ.get("LOG_EVERY", "0") or "0")  # batches; 0 disables
+    TRAIN_LOSS_MAVG = int(os.environ.get("TRAIN_LOSS_MAVG", "0") or "0")  # window; 0 disables
+    _train_loss_window: list[float] = []
+    _train_acc_window: list[float] = []
+    initial_console_log_done = False
+    # Optional: hard cap on total training steps and evaluate only once at the very end
+    MAX_STEPS = int(os.environ.get("MAX_STEPS", "0") or "0")
+    EVAL_ONLY_LAST = os.environ.get("EVAL_ONLY_LAST", "").lower() in ("1", "true", "yes")
 
     # Initialize distributed training if in distributed environment (e.g. torchrun)
     if "LOCAL_RANK" in os.environ:
@@ -597,6 +630,7 @@ def launch(hydra_config: DictConfig):
 
     # Training Loop
     for _iter_id in range(total_iters):
+        early_stop = False
         print (f"[Rank {RANK}, World Size {WORLD_SIZE}]: Epoch {_iter_id * train_epochs_per_iter}")
 
         ############ Train Iter
@@ -609,10 +643,60 @@ def launch(hydra_config: DictConfig):
             if RANK == 0 and metrics is not None:
                 wandb.log(metrics, step=train_state.step)
                 progress_bar.update(train_state.step - progress_bar.n)  # type: ignore
+                # Optional concise console log:
+                # - Always print once on the very first step to validate logging
+                # - Then print every LOG_EVERY steps when LOG_EVERY > 0
+                if (train_state.step == 1 and not initial_console_log_done) or (LOG_EVERY and (train_state.step % LOG_EVERY == 0)):
+                    loss_key = "train/loss"
+                    acc_key = "train/accuracy" if "train/accuracy" in metrics else ("train/exact_accuracy" if "train/exact_accuracy" in metrics else None)
+                    # Update moving windows only if enabled
+                    if TRAIN_LOSS_MAVG and loss_key in metrics:
+                        _train_loss_window.append(float(metrics[loss_key]))
+                        if len(_train_loss_window) > TRAIN_LOSS_MAVG:
+                            _train_loss_window.pop(0)
+                    if TRAIN_LOSS_MAVG and acc_key is not None:
+                        try:
+                            _train_acc_window.append(float(metrics[acc_key]))
+                            if len(_train_acc_window) > TRAIN_LOSS_MAVG:
+                                _train_acc_window.pop(0)
+                        except Exception:
+                            pass
+                    loss_ma = (sum(_train_loss_window) / max(1, len(_train_loss_window))) if (TRAIN_LOSS_MAVG and _train_loss_window) else None
+                    acc_ma  = (sum(_train_acc_window)  / max(1, len(_train_acc_window)))  if (TRAIN_LOSS_MAVG and _train_acc_window)  else None
+                    lr = metrics.get("train/lr", None)
+                    parts = [f"[step {train_state.step}/{train_state.total_steps}]"]
+                    if loss_key in metrics:
+                        if loss_ma is not None:
+                            parts.append(f"train_loss={metrics[loss_key]:.4f} (avg{TRAIN_LOSS_MAVG}={loss_ma:.4f})")
+                        else:
+                            parts.append(f"train_loss={metrics[loss_key]:.4f}")
+                    if acc_key is not None and acc_key in metrics:
+                        if acc_ma is not None:
+                            parts.append(f"train_acc={metrics[acc_key]:.4f} (avg{TRAIN_LOSS_MAVG}={acc_ma:.4f})")
+                        else:
+                            parts.append(f"train_acc={metrics[acc_key]:.4f}")
+                    if lr is not None:
+                        parts.append(f"lr={float(lr):.3e}")
+                    # First-print banner to confirm logging cadence
+                    if not initial_console_log_done:
+                        cadence = LOG_EVERY if LOG_EVERY else "disabled"
+                        parts.insert(0, f"[console logging enabled: LOG_EVERY={cadence}, TRAIN_LOSS_MAVG={TRAIN_LOSS_MAVG}]")
+                        initial_console_log_done = True
+                    print(" ".join(parts))
             if config.ema:
                 ema_helper.update(train_state.model)
+            # Early stop based on total steps (if set)
+            if MAX_STEPS and train_state.step >= MAX_STEPS:
+                early_stop = True
+                break
 
-        if _iter_id >= config.min_eval_interval:
+        # Evaluation trigger logic
+        do_eval = (_iter_id >= config.min_eval_interval)
+        if EVAL_ONLY_LAST:
+            # Only evaluate at the very end or when we early-stop
+            do_eval = do_eval and (early_stop or _iter_id == total_iters - 1)
+
+        if do_eval:
             ############ Evaluation
             if RANK == 0:
                 print("EVALUATE")
@@ -634,15 +718,38 @@ def launch(hydra_config: DictConfig):
 
             if RANK == 0 and metrics is not None:
                 wandb.log(metrics, step=train_state.step)
+                # Concise eval summary print
+                pass1 = metrics.get("ARC/pass@1", None)
+                # Try to recover eval loss from any set dictionary in metrics
+                eval_losses = []
+                for k, v in metrics.items():
+                    if isinstance(v, dict) and "loss" in v:
+                        try:
+                            eval_losses.append(float(v["loss"]))
+                        except Exception:
+                            pass
+                eval_loss = sum(eval_losses) / len(eval_losses) if len(eval_losses) else None
+                msg = f"[eval | step {train_state.step}/{train_state.total_steps}]"
+                if pass1 is not None:
+                    try:
+                        msg += f" eval_pass1={100.0*float(pass1):.2f}%"
+                    except Exception:
+                        msg += f" eval_pass1={pass1}"
+                if eval_loss is not None:
+                    msg += f" eval_loss={eval_loss:.4f}"
+                print(msg)
                 
             ############ Checkpointing
             if RANK == 0:
                 print("SAVE CHECKPOINT")
-            if RANK == 0 and (config.checkpoint_every_eval or (_iter_id == total_iters - 1)):
+            if RANK == 0 and (config.checkpoint_every_eval or (_iter_id == total_iters - 1) or early_stop):
                 save_train_state(config, train_state_eval)
 
             if config.ema:
                 del train_state_eval
+        # Exit outer loop if we early-stopped
+        if early_stop:
+            break
 
     # finalize
     if dist.is_initialized():
