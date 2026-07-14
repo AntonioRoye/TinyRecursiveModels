@@ -4,18 +4,17 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - "experiments/quick_isolated_pid_probe.py"
-      - "modal_pid_probe.py"
+      - "experiments/export_pid_probe_bundle.py"
       - ".github/workflows/puzzle-id-isolated-smoke.yml"
   workflow_dispatch:
 
 jobs:
-  probe:
+  export-bundle:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
-      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      PYTHONHASHSEED: "0"
+      HF_XET_HIGH_PERFORMANCE: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -23,25 +22,46 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Verify Modal credentials
+      - name: Install dependencies
         run: |
-          if [ -z "$MODAL_TOKEN_ID" ] || [ -z "$MODAL_TOKEN_SECRET" ]; then
-            echo "MODAL_TOKEN_ID / MODAL_TOKEN_SECRET are not configured in repository secrets."
-            exit 2
-          fi
+          python -m pip install --upgrade pip
+          python -m pip install numpy pydantic argdantic huggingface_hub hf_xet
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-      - name: Install Modal
-        run: python -m pip install --upgrade modal
-
-      - name: Run isolated checkpoint probe
+      - name: Download public ARC-1 checkpoint
         run: |
-          set -o pipefail
-          modal run modal_pid_probe.py --max-batches 1 --batch-size 64 2>&1 | tee pid_probe_action.log
+          python - <<'PY'
+          from huggingface_hub import hf_hub_download
+          path = hf_hub_download(
+              repo_id="arcprize/trm_arc_prize_verification",
+              filename="arc_v1_public/step_518071",
+              local_dir="checkpoints/hf_trm",
+          )
+          print(path)
+          PY
 
-      - name: Upload probe log
-        if: always()
+      - name: Build checkpoint-compatible ARC data
+        run: |
+          python -m dataset.build_arc_dataset \
+            --input-file-prefix kaggle/combined/arc-agi \
+            --output-dir data/arc-aug-1000 \
+            --subsets training evaluation concept \
+            --test-set-name evaluation \
+            --num-aug 1000
+
+      - name: Export reduced checkpoint and canonical samples
+        run: |
+          python -m experiments.export_pid_probe_bundle \
+            --checkpoint checkpoints/hf_trm/arc_v1_public/step_518071 \
+            --data-dir data/arc-aug-1000 \
+            --output-dir pid_probe_bundle \
+            --num-puzzles 8
+          ls -lh pid_probe_bundle
+          df -h .
+
+      - name: Upload reduced probe bundle
         uses: actions/upload-artifact@v4
         with:
-          name: puzzle-id-isolated-smoke-log
-          path: pid_probe_action.log
-          if-no-files-found: ignore
+          name: puzzle-id-probe-bundle
+          path: pid_probe_bundle/
+          compression-level: 1
