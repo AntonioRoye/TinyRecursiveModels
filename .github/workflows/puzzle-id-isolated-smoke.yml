@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - "experiments/export_pid_probe_bundle.py"
+      - "experiments/export_pid_probe_bundle_light.py"
       - ".github/workflows/puzzle-id-isolated-smoke.yml"
   workflow_dispatch:
 
@@ -40,22 +40,15 @@ jobs:
           print(path)
           PY
 
-      - name: Build checkpoint-compatible ARC data
+      - name: Replay IDs and export reduced checkpoint bundle
         run: |
-          python -m dataset.build_arc_dataset \
-            --input-file-prefix kaggle/combined/arc-agi \
-            --output-dir data/arc-aug-1000 \
-            --subsets training evaluation concept \
-            --test-set-name evaluation \
-            --num-aug 1000
-
-      - name: Export reduced checkpoint and canonical samples
-        run: |
-          python -m experiments.export_pid_probe_bundle \
+          python -m experiments.export_pid_probe_bundle_light \
             --checkpoint checkpoints/hf_trm/arc_v1_public/step_518071 \
-            --data-dir data/arc-aug-1000 \
+            --input-prefix kaggle/combined/arc-agi \
             --output-dir pid_probe_bundle \
-            --num-puzzles 8
+            --num-puzzles 8 \
+            --num-aug 1000 \
+            --seed 42
           ls -lh pid_probe_bundle
           df -h .
 
