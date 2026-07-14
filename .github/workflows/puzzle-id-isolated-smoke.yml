@@ -1,0 +1,47 @@
+name: Puzzle ID isolated smoke
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "experiments/quick_isolated_pid_probe.py"
+      - "modal_pid_probe.py"
+      - ".github/workflows/puzzle-id-isolated-smoke.yml"
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify Modal credentials
+        run: |
+          if [ -z "$MODAL_TOKEN_ID" ] || [ -z "$MODAL_TOKEN_SECRET" ]; then
+            echo "MODAL_TOKEN_ID / MODAL_TOKEN_SECRET are not configured in repository secrets."
+            exit 2
+          fi
+
+      - name: Install Modal
+        run: python -m pip install --upgrade modal
+
+      - name: Run isolated checkpoint probe
+        run: |
+          set -o pipefail
+          modal run modal_pid_probe.py --max-batches 1 --batch-size 64 2>&1 | tee pid_probe_action.log
+
+      - name: Upload probe log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: puzzle-id-isolated-smoke-log
+          path: pid_probe_action.log
+          if-no-files-found: ignore
