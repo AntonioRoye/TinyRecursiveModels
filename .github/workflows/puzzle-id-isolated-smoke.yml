@@ -1,0 +1,60 @@
+name: Puzzle ID isolated smoke
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "experiments/export_pid_probe_bundle_light.py"
+      - ".github/workflows/puzzle-id-isolated-smoke.yml"
+  workflow_dispatch:
+
+jobs:
+  export-bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      PYTHONHASHSEED: "0"
+      HF_XET_HIGH_PERFORMANCE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy pydantic argdantic huggingface_hub hf_xet
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Download public ARC-1 checkpoint
+        run: |
+          python - <<'PY'
+          from huggingface_hub import hf_hub_download
+          path = hf_hub_download(
+              repo_id="arcprize/trm_arc_prize_verification",
+              filename="arc_v1_public/step_518071",
+              local_dir="checkpoints/hf_trm",
+          )
+          print(path)
+          PY
+
+      - name: Replay IDs and export reduced checkpoint bundle
+        run: |
+          python -m experiments.export_pid_probe_bundle_light \
+            --checkpoint checkpoints/hf_trm/arc_v1_public/step_518071 \
+            --input-prefix kaggle/combined/arc-agi \
+            --output-dir pid_probe_bundle \
+            --num-puzzles 8 \
+            --num-aug 1000 \
+            --seed 42
+          ls -lh pid_probe_bundle
+          df -h .
+
+      - name: Upload reduced probe bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: puzzle-id-probe-bundle
+          path: pid_probe_bundle/
+          compression-level: 1
